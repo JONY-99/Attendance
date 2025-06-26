@@ -1,44 +1,50 @@
 from .models import Lesson, Attendance, UserModel
-from .serializers import LessonSerializer, AttendanceSerializer, RegisterSerializer
-from rest_framework.decorators import action, api_view, permission_classes
+from .serializers import LessonSerializer, AttendanceSerializer, RegisterSerializer,  LessonCreateSerializer
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import viewsets, status
 from django.utils import timezone
+
 from drf_yasg.utils import swagger_auto_schema
-from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny
+from drf_yasg import openapi
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+
 
 class LessonViewSet(viewsets.ModelViewSet):
     queryset = Lesson.objects.all()
     serializer_class = LessonSerializer
+    create_lesson_serializer_class = LessonCreateSerializer
+    permission_classes = [IsAuthenticated]
 
-    def perform_create(self, serializer):
-        lesson = serializer.save()
-        lesson.generate_qr()
-        lesson.save(update_fields=['qr_code'])
+    
+     
 
+    @swagger_auto_schema(
+        method='get',
+        operation_summary="QR kod yaratish",
+        operation_description="Darsga QR kod generatsiya qiladi.",
+        responses={200: openapi.Response('QR code URL')}
+    )
     @action(detail=True, methods=['get'])
-    def generate_qr(self, request, pk=None):
+    def generate_qr(self, request):
         lesson = self.get_object()
-
-    # QR kodni generate qilish
         lesson.generate_qr()
-
-    # Saqlash
         lesson.save(update_fields=['qr_code'])
 
-    # Fayl mavjudligini tekshirish
         if not lesson.qr_code:
-            return Response(
-                {"error": "QR kod saqlanmadi."},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
+            return Response({"error": "QR kod saqlanmadi."}, status=500)
 
-    # To‘liq URL hosil qilish
         full_url = request.build_absolute_uri(lesson.qr_code.url)
-
         return Response({'qr_code_url': full_url})
+
+    @swagger_auto_schema(
+        method='post',
+        operation_summary="Davomat belgilash",
+        operation_description="O'quvchi QR orqali davomatni belgilaydi.",
+        responses={201: AttendanceSerializer, 403: 'Forbidden', 400: 'Already marked'}
+    )
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def mark_attendance(self, request, pk=None):
         user = request.user
@@ -68,41 +74,23 @@ class LessonViewSet(viewsets.ModelViewSet):
 
         return Response(AttendanceSerializer(attendance).data, status=status.HTTP_201_CREATED)
 
+    @swagger_auto_schema(
+        method='get',
+        operation_summary="Ustozning barcha darslari",
+        responses={200: LessonSerializer(many=True)}
+    )
+    @action(detail=False, methods=['get'], url_path='teacher')
+    def teacher_lessons(self, request):
+        if str(request.user.role) != "2":
+            return Response({"error": "Faqat ustozlar uchun"}, status=403)
 
-@swagger_auto_schema(
-    method='get',
-    operation_summary="Ustozning darslari",
-    operation_description="Tizimga kirgan ustoz uchun biriktirilgan barcha darslar ro'yxatini qaytaradi.",
-    responses={200: LessonSerializer(many=True)},
-)
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def teacher_lessons(request):
-    user = request.user
-    if str(user.role) != "2":
-        return Response({"error": "Faqat ustozlar uchun"}, status=403)
-
-    lessons = Lesson.objects.filter(teacher=user)
-    serializer = LessonSerializer(lessons, many=True)
-    return Response(serializer.data)
-
-
-
-# views.py
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
-
-from .models import Lesson
-from accounts.serializers import RegisterSerializer
-
-
-class LessonStudentsAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+        lessons = Lesson.objects.filter(teacher=request.user)
+        serializer = self.get_serializer(lessons, many=True)
+        return Response(serializer.data)
 
     @swagger_auto_schema(
+        method='get',
+        operation_summary="Darsga biriktirilgan o‘quvchilar",
         manual_parameters=[
             openapi.Parameter(
                 'lesson_id',
@@ -114,7 +102,8 @@ class LessonStudentsAPIView(APIView):
         ],
         responses={200: RegisterSerializer(many=True)}
     )
-    def get(self, request):
+    @action(detail=False, methods=['get'], url_path='students')
+    def lesson_students(self, request):
         lesson_id = request.query_params.get("lesson_id")
 
         if not lesson_id or not lesson_id.isdigit():
@@ -127,17 +116,30 @@ class LessonStudentsAPIView(APIView):
         students = lesson.subject.classroom.students.all()
         serializer = RegisterSerializer(students, many=True)
         return Response({"students": serializer.data})
-    
 
-class NotifyStudentsAPIView(APIView):
-    permission_classes = [AllowAny]
-
-    def post(self, request):
+    @swagger_auto_schema(
+        method='post',
+        operation_summary="O‘quvchilarga bildirishnoma (QR + fan nomi)",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'lesson_id': openapi.Schema(type=openapi.TYPE_INTEGER)
+            },
+            required=['lesson_id']
+        ),
+        responses={200: openapi.Response('Success')}
+    )
+    @action(detail=False, methods=['post'], url_path='notify')
+    def notify_students(self, request):
         lesson_id = request.data.get("lesson_id")
-        subject = Lesson.objects.get(id=lesson_id).subject.name
-        qr_code = Lesson.objects.get(id=lesson_id).qr_code.url
-        students = Lesson.objects.get(id=lesson_id).subject.classroom.students.all()
-        
+        lesson = Lesson.objects.filter(id=lesson_id).first()
+        if not lesson:
+            return Response({"error": "Dars topilmadi"}, status=404)
+
+        subject = lesson.subject.name
+        qr_code = lesson.qr_code.url if lesson.qr_code else ""
+        students = lesson.subject.classroom.students.all()
+
         result = []
         for student in students:
             if student.telegram_id:
@@ -149,4 +151,54 @@ class NotifyStudentsAPIView(APIView):
 
         return Response(result)
 
+    @swagger_auto_schema(
+        method='get',
+        operation_summary="O‘quvchining davomatlari",
+        manual_parameters=[
+            openapi.Parameter(
+                'telegram_id',
+                openapi.IN_PATH,
+                description="Telegram ID",
+                type=openapi.TYPE_STRING,
+                required=True
+            )
+        ],
+        responses={200: AttendanceSerializer(many=True)}
+    )
+    @action(detail=False, methods=['get'], url_path='attendance-stat/(?P<telegram_id>[^/.]+)')
+    def attendance_stat(self, request, telegram_id):
+        if str(request.user.role) != "1":
+            return Response({"error": "Faqat o'quvchilar uchun"}, status=403)
+
+        user = UserModel.objects.filter(telegram_id=telegram_id).first()
+        if not user:
+            return Response({"error": "Bunday o'quvchi topilmadi"}, status=404)
+
+        attendance = Attendance.objects.filter(student=user)
+        serializer = AttendanceSerializer(attendance, many=True)
+        return Response(serializer.data)
+    
+
+
+ 
+@swagger_auto_schema(
+    method='post',
+    operation_summary="Yangi dars yaratish",
+    operation_description="Bu endpoint orqali yangi dars (lesson) yaratiladi.",
+    request_body=LessonCreateSerializer,
+    responses={
+        201: openapi.Response("Yaratilgan dars ma'lumotlari", LessonSerializer),
+        400: "Xatolik"
+    }
+)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def lesson_created(request):
+    serializer = LessonCreateSerializer(data=request.data)
+    if serializer.is_valid():
+        lesson = serializer.save()
+        lesson.generate_qr()  # QR yaratish (agar metod bo‘lsa)
+        lesson.save(update_fields=['qr_code'])
+        return Response(LessonSerializer(lesson).data, status=status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

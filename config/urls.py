@@ -27,6 +27,7 @@ urlpatterns = [
     path('', include('accounts.urls')),
     path('', include(router.urls)),
     path('', include('attendance.urls')),
+     
 
     # Swagger
     re_path(r'^swagger(?P<format>\.json|\.yaml)$', schema_view.without_ui(cache_timeout=0), name='schema-json'),
