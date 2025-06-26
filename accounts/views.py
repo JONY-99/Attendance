@@ -205,7 +205,23 @@ def login_view(request):
         "refresh_token": str(refresh)
     })
 
-
+@swagger_auto_schema(
+    method='post',
+    operation_summary="Logout qilish",
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        required=['refresh_token'],
+        properties={
+            'refresh_token': openapi.Schema(type=openapi.TYPE_STRING)
+        }
+    ),
+    responses={
+        200: openapi.Response(description="Logout muvaffaqiyatli"),
+        400: "Xatolik"
+    }
+)
+@api_view(['POST'])
+@permission_classes([AllowAny])
 def logout_view(request):
     """
     Logout view to blacklist the refresh token.
@@ -220,6 +236,94 @@ def logout_view(request):
         return Response({"message": "Logout muvaffaqiyatli"}, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    
+@swagger_auto_schema(
+    method='post',
+    operation_summary="Parolni unutganlar uchun",
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        required=['phone'],
+        properties={
+            'phone': openapi.Schema(type=openapi.TYPE_STRING)
+        }
+    ),
+    responses={
+        200: openapi.Response(description="OTP yuborildi"),
+        400: "Xatolik",
+        404: "Foydalanuvchi topilmadi"
+    }
+)
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def forgot_password(request):
+    """
+    Forgot password view to send OTP for password reset.
+    """
+    
+    phone = request.data.get("phone")
+    if not phone:
+        return Response({"error": "Telefon raqami talab qilinadi"}, status=status.HTTP_400_BAD_REQUEST)
+
+    user = UserModel.objects.filter(phone=phone).first()
+    if not user:
+        return Response({"error": "Foydalanuvchi topilmadi"}, status=status.HTTP_404_NOT_FOUND)
+
+    otp_code = create_otp()
+    otp_key = str(uuid.uuid4())
+    OTPmodel.objects.create(
+        user=user,
+        otp_code=otp_code,
+        otp_key=otp_key,
+        expires_at=now() + timedelta(minutes=2)
+    )
+    
+    send_otp_to_telegram(phone_number=user.phone, otp_code=otp_code)
+
+    return Response({"otp_key": otp_key}, status=status.HTTP_200_OK)
+
+@swagger_auto_schema(
+    method='post',
+    operation_summary="Parolni yangilash",
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        required=['otp_key', 'otp_code', 'new_password'],
+        properties={
+            'otp_key': openapi.Schema(type=openapi.TYPE_STRING, format="uuid"),
+            'otp_code': openapi.Schema(type=openapi.TYPE_STRING),
+            'new_password': openapi.Schema(type=openapi.TYPE_STRING, format='password')
+        }
+    ),
+    responses={
+        200: openapi.Response(description="Parol muvaffaqiyatli yangilandi"),
+        400: "Xatolik"
+    }
+)
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def update_password(request):
+    """
+    Update password view to change the user's password.
+    """
+    otp_key = request.data.get("otp_key")
+    otp_code = request.data.get("otp_code")
+    new_password = request.data.get("new_password")
+
+    if not otp_key or not otp_code or not new_password:
+        return Response({"error": "OTP kaliti, OTP kodi va yangi parol talab qilinadi"}, status=status.HTTP_400_BAD_REQUEST)    
+    
+    otp = OTPmodel.objects.filter(otp_key=otp_key, expires_at__gt=now()).first()
+    if not otp:
+        return Response({"error": "OTP topilmadi yoki eskirgan"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    if otp.otp_code != otp_code:
+        return Response({"error": "Noto‘g‘ri OTP kodi"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    user = otp.user
+    user.set_password(new_password)
+    user.save()
+    otp.delete()
+
+    return Response({"message": "Parol muvaffaqiyatli yangilandi"}, status=status.HTTP_200_OK)
 
 
 

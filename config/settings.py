@@ -47,8 +47,7 @@ INSTALLED_APPS = [
 
     'accounts',
     'attendance',
-    'teacherbot',
-    'studentbot',
+     
 
 
     'drf_yasg',
